@@ -350,7 +350,7 @@ if __name__ =='__main__':
     lenItem = 1
     # 频繁集初始化
     candidateSet = Candidate(lenItem)
-    for i in range(0, 34):
+    for i in range(len(Items)):
         candidateSet.addCandidate([str(i)])
 
     # 对1-频繁集计算支持度
@@ -388,6 +388,9 @@ if __name__ =='__main__':
         F.append(candidatesets)
         for i, item in enumerate(candidatesets):
             FCount[conToKey(item)] = setscount[i]
+
+        if lenItem == MinLen:
+            break
 
     print "生成规则..."
 
