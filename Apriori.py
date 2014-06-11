@@ -6,6 +6,7 @@ import os
 import pickle
 import socket
 import signal
+from multiprocessing import cpu_count
 from optparse import OptionParser
 
 # 中文帮助编码问题修复
@@ -14,8 +15,10 @@ sys.setdefaultencoding('utf-8')
 
 # 并行管理
 ChildProcess = 0
-ParentSocket = None
+ChildNum = 0
+ParentSocket = []
 ChildSocket = None
+CpuNum = cpu_count() - 1
 
 SrcDataFile = None
 
@@ -389,23 +392,32 @@ if __name__ =='__main__':
         FCount[conToKey(item)] = setscount[i]
 
 
-    # 创建子进程
-    ChildProcess = os.fork()
+    # 根据CPU核心数，创建子进程
+    for i in range(CpuNum):
+        ChildNum = i
+        ChildProcess = os.fork()
+        if ChildProcess == 0:
+            break
 
     if ChildProcess:
-        ParentSocket = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
-        ParentSocket.bind("/tmp/apriori-parent")
-        ParentSocket.recv(1024)
+        for i in range(CpuNum):
+            ParentSocket.append(socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM))
+            ParentSocket[-1].bind("/tmp/apriori-parent-%s" % i)
     else:
         ChildSocket = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
-        ChildSocket.bind("/tmp/apriori-child")
-        ChildSocket.sendto("Go", "/tmp/apriori-parent")
+        ChildSocket.bind("/tmp/apriori-child-%s" % ChildNum)
+        #ChildSocket.sendto("Go", "/tmp/apriori-parent-%s" % ChildNum)
+
+    # TODO: 父子进程之间同步
 
     # 切分数据
     if ChildProcess == 0:
-        Transaction = Transaction[:len(Transaction)/2]
+        start = ((len(Transaction)/(CpuNum+2))*ChildNum)
+        end = (len(Transaction)/(CpuNum+2))*(ChildNum+1)
+        Transaction = Transaction[start:end]
     else:
-        Transaction = Transaction[len(Transaction)/2:]
+        start = (len(Transaction)/(CpuNum+2))*(ChildNum+1)
+        Transaction = Transaction[start:]
 
     # TODO: unix domain socket收发逻辑
     while True:
@@ -416,7 +428,8 @@ if __name__ =='__main__':
             candidateSet.addAll(aprioriGen(F[lenItem-2], lenItem-1))
             # 序列化对象发送给子进程
             candidateDumps = pickle.dumps(candidateSet)
-            ParentSocket.sendto(candidateDumps, "/tmp/apriori-child")
+            for i in range(CpuNum):
+                ParentSocket[i].sendto(candidateDumps, "/tmp/apriori-child-%s" % i)
 
         if ChildProcess == 0:
             candidateDumps = ChildSocket.recv(204800)
@@ -433,20 +446,23 @@ if __name__ =='__main__':
 
         if ChildProcess == 0:
             candidateDumps = pickle.dumps(candidateSet)
-            ChildSocket.sendto(candidateDumps, "/tmp/apriori-parent")
+            ChildSocket.sendto(candidateDumps, "/tmp/apriori-parent-%s" % ChildNum)
 
 
         if ChildProcess:
-            candidateDumps = ParentSocket.recv(204800)
-            candidateSetChild = pickle.loads(candidateDumps)
+            candidateSetChild = []
+            for i in range(CpuNum):
+                candidateDumps = ParentSocket[i].recv(204800)
+                candidateSetChild.append(pickle.loads(candidateDumps))
 
             # 合并父子进程数据
-            for item in candidateSetChild.candidate:
-                if item in candidateSet.candidate:
-                    candidateSet.support[candidateSet.candidate.index(item)] += candidateSetChild.support[candidateSetChild.candidate.index(item)]
-                else:
-                    candidateSet.candidate.append(item)
-                    candidateSet.support.append(candidateSetChild.support[candidateSetChild.candidate.index(item)])
+            for candidateSetChildItem in candidateSetChild:
+                for item in candidateSetChildItem.candidate:
+                    if item in candidateSet.candidate:
+                        candidateSet.support[candidateSet.candidate.index(item)] += candidateSetChildItem.support[candidateSetChildItem.candidate.index(item)]
+                    else:
+                        candidateSet.candidate.append(item)
+                        candidateSet.support.append(candidateSetChildItem.support[candidateSetChildItem.candidate.index(item)])
 
 
             candidatesets, setscount = candidateSet.extractFrequentSet()
@@ -480,6 +496,3 @@ if __name__ =='__main__':
                 apGenRules(frequentItem, F1)
 
     showRules()
-
-    os.unlink("/tmp/apriori-parent")
-    os.unlink("/tmp/apriori-child")
