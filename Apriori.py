@@ -5,7 +5,6 @@ import sys
 import os
 import pickle
 import socket
-import signal
 from multiprocessing import cpu_count
 from optparse import OptionParser
 
@@ -15,6 +14,7 @@ sys.setdefaultencoding('utf-8')
 
 # 并行管理
 ChildProcess = 0
+ChildProcessList = []
 ChildNum = 0
 ParentSocket = []
 ChildSocket = None
@@ -303,17 +303,7 @@ def showRules():
             if (mark == True):
                 print prefixLine + midLine + sufixLine + '   置信度: ' + str(rule[2])
 
-def termSigHandle(signum, frame):
-    if ParentSocket:
-        os.unlink("/tmp/apriori-parent")
-    if ChildSocket:
-        os.unlink("/tmp/apriori-child")
-
 if __name__ =='__main__':
-
-    # 退出事件捕捉
-    signal.signal(signal.SIGTERM, termSigHandle)
-    signal.signal(signal.SIGINT, termSigHandle)
 
     # 参数解析器
     optparser = OptionParser()
@@ -370,6 +360,13 @@ if __name__ =='__main__':
     GetTrans(fd)
     fd.close()
 
+    # 删除遗留socket
+    for i in range(CpuNum):
+        if os.path.exists("/tmp/apriori-parent-%s" % i):
+            os.unlink("/tmp/apriori-parent-%s" % i)
+        if os.path.exists("/tmp/apriori-child-%s" % i):
+            os.unlink("/tmp/apriori-child-%s" % i)
+
     # 频繁项集初始长度
     lenItem = 1
     # 频繁集初始化
@@ -396,6 +393,7 @@ if __name__ =='__main__':
     for i in range(CpuNum):
         ChildNum = i
         ChildProcess = os.fork()
+        ChildProcessList.append(ChildProcess)
         if ChildProcess == 0:
             break
 
@@ -496,3 +494,8 @@ if __name__ =='__main__':
                 apGenRules(frequentItem, F1)
 
     showRules()
+
+
+    if ChildProcess:
+        for item in ChildProcessList:
+            os.kill(item, 9)
