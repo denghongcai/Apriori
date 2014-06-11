@@ -2,10 +2,20 @@
 #encoding=utf8
 
 import sys
+import os
+import pickle
+import socket
+import signal
 from optparse import OptionParser
 
+# 中文帮助编码问题修复
 reload(sys)
 sys.setdefaultencoding('utf-8')
+
+# 并行管理
+ChildProcess = 0
+ParentSocket = None
+ChildSocket = None
 
 SrcDataFile = None
 
@@ -290,8 +300,19 @@ def showRules():
             if (mark == True):
                 print prefixLine + midLine + sufixLine + '   置信度: ' + str(rule[2])
 
+def termSigHandle(signum, frame):
+    if ParentSocket:
+        os.unlink("/tmp/apriori-parent")
+    if ChildSocket:
+        os.unlink("/tmp/apriori-child")
+
 if __name__ =='__main__':
 
+    # 退出事件捕捉
+    signal.signal(signal.SIGTERM, termSigHandle)
+    signal.signal(signal.SIGINT, termSigHandle)
+
+    # 参数解析器
     optparser = OptionParser()
     optparser.add_option('-f', '--inputDataSource',
                          dest='inputDataSource',
@@ -367,11 +388,39 @@ if __name__ =='__main__':
     for i, item in enumerate(candidatesets):
         FCount[conToKey(item)] = setscount[i]
 
+
+    # 创建子进程
+    ChildProcess = os.fork()
+
+    if ChildProcess:
+        ParentSocket = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+        ParentSocket.bind("/tmp/apriori-parent")
+        ParentSocket.recv(1024)
+    else:
+        ChildSocket = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+        ChildSocket.bind("/tmp/apriori-child")
+        ChildSocket.sendto("Go", "/tmp/apriori-parent")
+
+    # 切分数据
+    if ChildProcess == 0:
+        Transaction = Transaction[:len(Transaction)/2]
+    else:
+        Transaction = Transaction[len(Transaction)/2:]
+
+    # TODO: unix domain socket收发逻辑
     while True:
         lenItem = lenItem + 1
-        candidateSet = Candidate(lenItem)
-        # 将项目集添加到候选集
-        candidateSet.addAll(aprioriGen(F[lenItem-2], lenItem-1))
+        if ChildProcess:
+            candidateSet = Candidate(lenItem)
+            # 将项目集添加到候选集
+            candidateSet.addAll(aprioriGen(F[lenItem-2], lenItem-1))
+            # 序列化对象发送给子进程
+            candidateDumps = pickle.dumps(candidateSet)
+            ParentSocket.sendto(candidateDumps, "/tmp/apriori-child")
+
+        if ChildProcess == 0:
+            candidateDumps = ChildSocket.recv(204800)
+            candidateSet = pickle.loads(candidateDumps)
 
         # 生成 Hash Tree
         for transaction in Transaction:
@@ -381,16 +430,34 @@ if __name__ =='__main__':
             level = 0
             root = HashTree(templist, lenItem, level)
             subset(candidateSet, root)
-        # 终止条件
-        candidatesets, setscount = candidateSet.extractFrequentSet()
-        if len(candidatesets) == 0:
-            break
-        F.append(candidatesets)
-        for i, item in enumerate(candidatesets):
-            FCount[conToKey(item)] = setscount[i]
 
-        if lenItem == MinLen:
-            break
+        if ChildProcess == 0:
+            candidateDumps = pickle.dumps(candidateSet)
+            ChildSocket.sendto(candidateDumps, "/tmp/apriori-parent")
+
+
+        if ChildProcess:
+            candidateDumps = ParentSocket.recv(204800)
+            candidateSetChild = pickle.loads(candidateDumps)
+
+            # 合并父子进程数据
+            for item in candidateSetChild.candidate:
+                if item in candidateSet.candidate:
+                    candidateSet.support[candidateSet.candidate.index(item)] += candidateSetChild.support[candidateSetChild.candidate.index(item)]
+                else:
+                    candidateSet.candidate.append(item)
+                    candidateSet.support.append(candidateSetChild.support[candidateSetChild.candidate.index(item)])
+
+
+            candidatesets, setscount = candidateSet.extractFrequentSet()
+            if len(candidatesets) == 0:
+                break
+            F.append(candidatesets)
+            for i, item in enumerate(candidatesets):
+                FCount[conToKey(item)] = setscount[i]
+
+            if lenItem == MinLen:
+                break
 
     print "生成规则..."
 
@@ -413,3 +480,6 @@ if __name__ =='__main__':
                 apGenRules(frequentItem, F1)
 
     showRules()
+
+    os.unlink("/tmp/apriori-parent")
+    os.unlink("/tmp/apriori-child")
